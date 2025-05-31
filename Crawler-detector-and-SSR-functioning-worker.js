@@ -46,6 +46,17 @@ const PERF_BUDGET = {
   imageOptimizationThreshold: 50 * 1024, // New - optimize images > 50KB
 };
 
+const GITHUB_API_CONFIG = {
+  cacheTime: 60 * 60, // 1 hour in seconds
+  timeout: 10000, // 10 seconds
+  corsHeaders: {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
+    "Access-Control-Allow-Headers":
+      "Content-Type, Authorization, X-Requested-With",
+    "Access-Control-Max-Age": "86400",
+  },
+};
 /**
  * Bot rendering configuration with enhanced patterns
  */
@@ -181,7 +192,12 @@ const BOT_CONFIG = {
     "/marketing-plan": ["/api/marketing-plans?populate=*"],
     "/business-plan": ["/api/business-plans?populate=*"],
     "/blog": ["/api/blog-posts?populate=*&pagination[limit]=20"],
-    "/coding-project": ["/api/coding-projects?populate=*&pagination[limit]=20"],
+    "/coding-project": [
+      "/api/coding-projects?populate=*&pagination[limit]=20",
+      "/api/github/users/Shain-Wai-Yan",
+      "/api/github/users/Shain-Wai-Yan/pinned",
+      "/api/github/users/Shain-Wai-Yan/top-languages",
+    ],
     "/amv-editing": ["/api/amv-projects?populate=*&pagination[limit]=20"],
     "/zh/photography": [
       "/api/photographies?populate=*&locale=zh&pagination[limit]=50",
@@ -192,6 +208,9 @@ const BOT_CONFIG = {
     "/zh/blog": ["/api/blog-posts?populate=*&locale=zh&pagination[limit]=20"],
     "/zh/coding-project": [
       "/api/coding-projects?populate=*&locale=zh&pagination[limit]=20",
+      "/api/github/users/Shain-Wai-Yan",
+      "/api/github/users/Shain-Wai-Yan/pinned",
+      "/api/github/users/Shain-Wai-Yan/top-languages",
     ],
     "/zh/amv-editing": [
       "/api/amv-projects?populate=*&locale=zh&pagination[limit]=20",
@@ -1053,6 +1072,554 @@ function optimizeForMobile(html, userAgent) {
     return html;
   }
 }
+
+// ======================================================================
+// GITHUB API HANDLER FUNCTIONS
+// ======================================================================
+
+/**
+ * Handle GitHub API requests
+ */
+async function handleGitHubAPI(request, env, ctx) {
+  const url = new URL(request.url);
+  const path = url.pathname;
+
+  // Only handle GitHub API routes
+  if (!path.startsWith("/api/github/")) {
+    return null;
+  }
+
+  console.log(`🔍 GitHub API request: ${path}`);
+
+  // Handle CORS preflight requests
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      headers: GITHUB_API_CONFIG.corsHeaders,
+    });
+  }
+
+  try {
+    // Get GitHub token from environment variable
+    const token = env.GITHUB_TOKEN || "";
+
+    if (!token) {
+      console.error("GitHub token not configured");
+      return new Response(
+        JSON.stringify({ error: "GitHub token not configured" }),
+        {
+          status: 500,
+          headers: {
+            "Content-Type": "application/json",
+            ...GITHUB_API_CONFIG.corsHeaders,
+          },
+        }
+      );
+    }
+
+    // Check cache first for GET requests
+    if (request.method === "GET") {
+      const cache = caches.default;
+      const cacheKey = new Request(url.toString(), request);
+      const cachedResponse = await cache.match(cacheKey);
+
+      if (cachedResponse) {
+        console.log(`📦 Cache hit for GitHub API: ${path}`);
+        const corsResponse = new Response(cachedResponse.body, cachedResponse);
+        Object.entries(GITHUB_API_CONFIG.corsHeaders).forEach(
+          ([key, value]) => {
+            corsResponse.headers.set(key, value);
+          }
+        );
+        return corsResponse;
+      }
+    }
+
+    // Route to appropriate handler
+    let response;
+    if (path.includes("/contributions")) {
+      response = await handleGitHubContributions(path, token);
+    } else if (path.includes("/pinned")) {
+      response = await handleGitHubPinnedRepos(path, token);
+    } else if (path.includes("/top-languages")) {
+      response = await handleGitHubTopLanguages(path, token);
+    } else if (path.includes("/detailed-activity")) {
+      response = await handleGitHubDetailedActivity(path, token);
+    } else {
+      // General GitHub API proxy
+      response = await handleGitHubProxy(path, token);
+    }
+
+    // Add CORS headers
+    Object.entries(GITHUB_API_CONFIG.corsHeaders).forEach(([key, value]) => {
+      response.headers.set(key, value);
+    });
+
+    // Cache successful GET responses
+    if (request.method === "GET" && response.status === 200) {
+      const cache = caches.default;
+      ctx.waitUntil(cache.put(request, response.clone()));
+    }
+
+    return response;
+  } catch (error) {
+    console.error(`GitHub API Error: ${error.message}`);
+    return new Response(
+      JSON.stringify({
+        error: "GitHub API request failed",
+        message: error.message,
+        path: path,
+      }),
+      {
+        status: 500,
+        headers: {
+          "Content-Type": "application/json",
+          ...GITHUB_API_CONFIG.corsHeaders,
+        },
+      }
+    );
+  }
+}
+
+/**
+ * Handle GitHub API proxy requests
+ */
+async function handleGitHubProxy(path, token) {
+  const githubPath = path.replace("/api/github/", "");
+
+  console.log(`🔄 Proxying to GitHub API: ${githubPath}`);
+
+  const response = await fetch(`https://api.github.com/${githubPath}`, {
+    headers: {
+      Authorization: `token ${token}`,
+      "User-Agent": "GitHub-Profile-Viewer",
+      Accept: "application/vnd.github.v3+json",
+    },
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    console.error(`GitHub API error: ${response.status}`, errorData);
+    return new Response(
+      JSON.stringify({
+        error: `GitHub API error: ${response.status}`,
+        details: errorData,
+      }),
+      {
+        status: response.status,
+        headers: {
+          "Content-Type": "application/json",
+        },
+      }
+    );
+  }
+
+  const data = await response.json();
+  return new Response(JSON.stringify(data), {
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": `public, max-age=${GITHUB_API_CONFIG.cacheTime}`,
+    },
+  });
+}
+
+/**
+ * Handle GitHub contributions
+ */
+async function handleGitHubContributions(path, token) {
+  const usernameMatch = path.match(/\/users\/([^/]+)\/contributions/);
+  if (!usernameMatch) {
+    return new Response(
+      JSON.stringify({ error: "Invalid username in request" }),
+      {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+
+  const username = usernameMatch[1];
+  console.log(`📊 Fetching contributions for: ${username}`);
+
+  const query = `
+    query {
+      user(login: "${username}") {
+        contributionsCollection {
+          contributionCalendar {
+            totalContributions
+            weeks {
+              contributionDays {
+                date
+                contributionCount
+                color
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const response = await fetch("https://api.github.com/graphql", {
+    method: "POST",
+    headers: {
+      Authorization: `bearer ${token}`,
+      "Content-Type": "application/json",
+      "User-Agent": "GitHub-Profile-Viewer",
+    },
+    body: JSON.stringify({ query }),
+  });
+
+  const data = await response.json();
+
+  if (data.errors) {
+    console.error("GraphQL errors:", data.errors);
+    return new Response(
+      JSON.stringify({
+        error: "Failed to fetch contribution data",
+        message: data.errors[0].message,
+      }),
+      {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+
+  const calendar =
+    data.data?.user?.contributionsCollection?.contributionCalendar;
+  if (!calendar) {
+    return new Response(
+      JSON.stringify({ error: "Contribution data not found" }),
+      {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+
+  const totalContributions = calendar.totalContributions;
+  const contributions = [];
+
+  calendar.weeks.forEach((week) => {
+    week.contributionDays.forEach((day) => {
+      contributions.push({
+        date: day.date,
+        count: day.contributionCount,
+        color: day.color,
+      });
+    });
+  });
+
+  return new Response(JSON.stringify({ totalContributions, contributions }), {
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": `public, max-age=${GITHUB_API_CONFIG.cacheTime}`,
+    },
+  });
+}
+
+/**
+ * Handle GitHub pinned repositories
+ */
+async function handleGitHubPinnedRepos(path, token) {
+  const usernameMatch = path.match(/\/users\/([^/]+)\/pinned/);
+  if (!usernameMatch) {
+    return new Response(
+      JSON.stringify({ error: "Invalid username in request" }),
+      {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+
+  const username = usernameMatch[1];
+  console.log(`📌 Fetching pinned repos for: ${username}`);
+
+  const query = `
+    query {
+      user(login: "${username}") {
+        pinnedItems(first: 6, types: REPOSITORY) {
+          nodes {
+            ... on Repository {
+              name
+              description
+              url
+              stargazerCount
+              forkCount
+              primaryLanguage {
+                name
+                color
+              }
+              updatedAt
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const response = await fetch("https://api.github.com/graphql", {
+    method: "POST",
+    headers: {
+      Authorization: `bearer ${token}`,
+      "Content-Type": "application/json",
+      "User-Agent": "GitHub-Profile-Viewer",
+    },
+    body: JSON.stringify({ query }),
+  });
+
+  const data = await response.json();
+
+  if (data.errors) {
+    console.error("GraphQL errors:", data.errors);
+    return new Response(
+      JSON.stringify({
+        error: "Failed to fetch pinned repositories",
+        message: data.errors[0].message,
+      }),
+      {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+
+  if (!data.data?.user?.pinnedItems?.nodes) {
+    return new Response(
+      JSON.stringify({ error: "Pinned repositories not found" }),
+      {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+
+  return new Response(JSON.stringify(data.data.user.pinnedItems.nodes), {
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": `public, max-age=${GITHUB_API_CONFIG.cacheTime}`,
+    },
+  });
+}
+
+/**
+ * Handle GitHub top languages
+ */
+async function handleGitHubTopLanguages(path, token) {
+  const usernameMatch = path.match(/\/users\/([^/]+)\/top-languages/);
+  if (!usernameMatch) {
+    return new Response(
+      JSON.stringify({ error: "Invalid username in request" }),
+      {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+
+  const username = usernameMatch[1];
+  console.log(`🔤 Fetching top languages for: ${username}`);
+
+  const query = `
+    query {
+      user(login: "${username}") {
+        repositories(first: 100, orderBy: {field: UPDATED_AT, direction: DESC}, isFork: false) {
+          nodes {
+            name
+            languages(first: 10, orderBy: {field: SIZE, direction: DESC}) {
+              edges {
+                size
+                node {
+                  name
+                  color
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const response = await fetch("https://api.github.com/graphql", {
+    method: "POST",
+    headers: {
+      Authorization: `bearer ${token}`,
+      "Content-Type": "application/json",
+      "User-Agent": "GitHub-Profile-Viewer",
+    },
+    body: JSON.stringify({ query }),
+  });
+
+  const data = await response.json();
+
+  if (data.errors) {
+    console.error("GraphQL errors:", data.errors);
+    return new Response(
+      JSON.stringify({
+        error: "Failed to fetch top languages",
+        message: data.errors[0].message,
+      }),
+      {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+
+  if (!data.data?.user?.repositories?.nodes) {
+    return new Response(
+      JSON.stringify({ error: "Repository language data not found" }),
+      {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+
+  // Process language data
+  const languages = {};
+  let totalSize = 0;
+
+  data.data.user.repositories.nodes.forEach((repo) => {
+    if (repo.languages?.edges) {
+      repo.languages.edges.forEach((edge) => {
+        const { name, color } = edge.node;
+        const size = edge.size;
+
+        if (!languages[name]) {
+          languages[name] = { size: 0, color };
+        }
+
+        languages[name].size += size;
+        totalSize += size;
+      });
+    }
+  });
+
+  if (totalSize === 0) {
+    return new Response(JSON.stringify([]), {
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  // Convert to array and calculate percentages
+  const languageArray = Object.keys(languages).map((name) => ({
+    name,
+    color: languages[name].color,
+    size: languages[name].size,
+    percentage: ((languages[name].size / totalSize) * 100).toFixed(1),
+  }));
+
+  // Sort by size (descending)
+  languageArray.sort((a, b) => b.size - a.size);
+
+  return new Response(JSON.stringify(languageArray), {
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": `public, max-age=${GITHUB_API_CONFIG.cacheTime}`,
+    },
+  });
+}
+
+/**
+ * Handle GitHub detailed activity
+ */
+async function handleGitHubDetailedActivity(path, token) {
+  const usernameMatch = path.match(/\/users\/([^/]+)\/detailed-activity/);
+  if (!usernameMatch) {
+    return new Response(
+      JSON.stringify({ error: "Invalid username in request" }),
+      {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+
+  const username = usernameMatch[1];
+  console.log(`📈 Fetching detailed activity for: ${username}`);
+
+  const query = `
+    query {
+      user(login: "${username}") {
+        contributionsCollection {
+          commitContributionsByRepository(maxRepositories: 10) {
+            repository {
+              name
+              url
+            }
+            contributions {
+              totalCount
+            }
+          }
+          pullRequestContributionsByRepository(maxRepositories: 10) {
+            repository {
+              name
+              url
+            }
+            contributions {
+              totalCount
+            }
+          }
+          issueContributionsByRepository(maxRepositories: 10) {
+            repository {
+              name
+              url
+            }
+            contributions {
+              totalCount
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const response = await fetch("https://api.github.com/graphql", {
+    method: "POST",
+    headers: {
+      Authorization: `bearer ${token}`,
+      "Content-Type": "application/json",
+      "User-Agent": "GitHub-Profile-Viewer",
+    },
+    body: JSON.stringify({ query }),
+  });
+
+  const data = await response.json();
+
+  if (data.errors) {
+    console.error("GraphQL errors:", data.errors);
+    return new Response(
+      JSON.stringify({
+        error: "Failed to fetch detailed activity",
+        message: data.errors[0].message,
+      }),
+      {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+
+  if (!data.data?.user?.contributionsCollection) {
+    return new Response(
+      JSON.stringify({ error: "Detailed activity data not found" }),
+      {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+
+  return new Response(JSON.stringify(data.data.user.contributionsCollection), {
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": `public, max-age=${GITHUB_API_CONFIG.cacheTime}`,
+    },
+  });
+}
 // ======================================================================
 // ENHANCED API FUNCTIONS
 // ======================================================================
@@ -1116,11 +1683,35 @@ async function fetchWithTimeout(url, options, timeout) {
 /**
  * Enhanced API data fetching with better error handling
  */
-async function fetchAndValidateApiData(apiEndpoints) {
+async function fetchAndValidateApiData(apiEndpoints, env, ctx) {
   const startTime = Date.now();
 
   const apiDataPromises = apiEndpoints.map(async (endpoint) => {
     try {
+      // Check if this is a GitHub API endpoint
+      if (endpoint.startsWith("/api/github/")) {
+        console.log(`🔍 Processing GitHub API endpoint: ${endpoint}`);
+
+        // Create a mock request for GitHub API handling
+        const mockRequest = new Request(`https://example.com${endpoint}`, {
+          method: "GET",
+          headers: {
+            "User-Agent": "SEO-Bot-Worker/6.0.0",
+          },
+        });
+
+        const githubResponse = await handleGitHubAPI(mockRequest, env, ctx);
+        if (githubResponse && githubResponse.ok) {
+          const data = await githubResponse.json();
+          console.log(`✅ GitHub API data received for ${endpoint}`);
+          return data;
+        } else {
+          console.error(`❌ GitHub API failed for ${endpoint}`);
+          return null;
+        }
+      }
+
+      // Handle regular Strapi API endpoints (your existing code)
       const headers = {
         Accept: "application/json",
         "Content-Type": "application/json",
@@ -1141,7 +1732,6 @@ async function fetchAndValidateApiData(apiEndpoints) {
 
         if (apiResponse?.ok) {
           const data = await apiResponse.json();
-
           if (validateApiResponse(data)) {
             performanceMetrics.primaryServerHealth = true;
             return data;
@@ -1163,7 +1753,6 @@ async function fetchAndValidateApiData(apiEndpoints) {
 
         if (backupResponse?.ok) {
           const data = await backupResponse.json();
-
           if (validateApiResponse(data)) {
             performanceMetrics.backupServerHealth = true;
             return data;
@@ -2121,17 +2710,39 @@ function getComponentType(pathname) {
 /**
  * Enhanced content generation with error boundaries
  */
-function generateContentForPath(pathname, apiData) {
+function generateContentForPath(pathname, apiDataResults) {
   const componentType = getComponentType(pathname);
 
   try {
+    if (componentType === "coding-project") {
+      // Check if we have GitHub API data
+      const hasGitHubData =
+        apiDataResults &&
+        Array.isArray(apiDataResults) &&
+        apiDataResults.some(
+          (item) => item && (item.login || Array.isArray(item))
+        );
+
+      if (hasGitHubData) {
+        console.log("✅ Using GitHub API data for coding project");
+        return generateGitHubContentHtml(apiDataResults);
+      } else {
+        console.log("⚠️ No GitHub data, using Strapi data");
+        // Find the first non-GitHub API response for Strapi data
+        const strapiData = apiDataResults?.find((item) => item && item.data);
+        return generateCodingProjectHtml(strapiData);
+      }
+    }
+
+    // Handle other content types with first API result
+    const apiData =
+      apiDataResults && apiDataResults.length > 0 ? apiDataResults[0] : null;
+
     switch (componentType) {
       case "photography":
         return generatePhotographyHtml(apiData);
       case "certificate":
         return generateCertificateHtml(apiData);
-      case "coding-project":
-        return generateCodingProjectHtml(apiData);
       case "marketing-plan":
         return generateMarketingPlanHtml(apiData);
       case "business-plan":
@@ -2154,18 +2765,17 @@ function generateContentForPath(pathname, apiData) {
  */
 async function injectContentSafely(html, apiDataResults, pathname) {
   try {
-    if (!apiDataResults || apiDataResults.length === 0 || !apiDataResults[0]) {
+    if (!apiDataResults || apiDataResults.length === 0) {
       return html;
     }
 
-    const apiData = apiDataResults[0];
-    const contentHtml = generateContentForPath(pathname, apiData);
+    const contentHtml = generateContentForPath(pathname, apiDataResults);
     const contentSelector =
       BOT_CONFIG.contentSelectors[pathname] ||
       BOT_CONFIG.defaultContentSelector;
 
-    // First try: exact selector match
-    if (contentSelector === "#masonry-grid") {
+    // Enhanced content injection with better pattern matching
+    if (pathname.includes("/photography")) {
       const gridPattern =
         /<div[^>]+id=["']masonry-grid["'][^>]*>[\s\S]*?<\/div>/i;
       if (gridPattern.test(html)) {
@@ -2174,7 +2784,10 @@ async function injectContentSafely(html, apiDataResults, pathname) {
           `<div class="masonry-grid" id="masonry-grid">${contentHtml}</div>`
         );
       }
-    } else if (contentSelector === ".document-list") {
+    } else if (
+      pathname.includes("/business-plan") ||
+      pathname.includes("/marketing-plan")
+    ) {
       const docPattern =
         /<div[^>]+class=["'][^"']*document-list[^"']*["'][^>]*>[\s\S]*?<\/div>/i;
       if (docPattern.test(html)) {
@@ -2183,9 +2796,22 @@ async function injectContentSafely(html, apiDataResults, pathname) {
           `<div class="document-list">${contentHtml}</div>`
         );
       }
+    } else if (pathname.includes("/coding-project")) {
+      // Inject GitHub content into the github-container
+      const githubPattern =
+        /<div[^>]+class="[^"]*github-container[^"]*"[^>]*>/i;
+      if (githubPattern.test(html)) {
+        return html.replace(githubPattern, `$&\n${contentHtml}`);
+      } else {
+        // Fallback: inject before closing main tag
+        return html.replace(
+          "</main>",
+          `<div class="bot-rendered-content">${contentHtml}</div></main>`
+        );
+      }
     }
 
-    // Second try: more generic approach
+    // Generic injection for other content types
     const mainPattern =
       /<main[^>]+id=["']main-content["'][^>]*>([\s\S]*?)<\/main>/i;
     if (mainPattern.test(html)) {
@@ -2208,6 +2834,119 @@ async function injectContentSafely(html, apiDataResults, pathname) {
   }
 }
 
+/**
+ * Enhanced GitHub content HTML generator
+ */
+function generateGitHubContentHtml(githubDataResults) {
+  try {
+    if (!githubDataResults || githubDataResults.length === 0) {
+      return '<div class="github-loading">Loading GitHub data...</div>';
+    }
+
+    let html = '<div class="github-bot-content">';
+
+    // Process GitHub API responses
+    githubDataResults.forEach((apiResponse, index) => {
+      if (!apiResponse) return;
+
+      console.log(
+        `Processing GitHub API response ${index}:`,
+        typeof apiResponse
+      );
+
+      // Handle user data (from /api/github/users/username)
+      if (apiResponse.login) {
+        html += `
+          <div class="github-profile-bot" itemscope itemtype="https://schema.org/Person">
+            <div class="profile-header-bot">
+              <img src="${apiResponse.avatar_url}" alt="${
+          apiResponse.login
+        }" width="80" height="80" itemprop="image">
+              <div class="profile-info-bot">
+                <h3 itemprop="name">${escapeHtml(
+                  apiResponse.name || apiResponse.login
+                )}</h3>
+                <p itemprop="alternateName">@${apiResponse.login}</p>
+                ${
+                  apiResponse.bio
+                    ? `<p itemprop="description">${escapeHtml(
+                        apiResponse.bio
+                      )}</p>`
+                    : ""
+                }
+                <div class="profile-stats-bot">
+                  <span>Repositories: <strong>${
+                    apiResponse.public_repos
+                  }</strong></span>
+                  <span>Followers: <strong>${
+                    apiResponse.followers
+                  }</strong></span>
+                  <span>Following: <strong>${
+                    apiResponse.following
+                  }</strong></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      // Handle pinned repositories array
+      if (
+        Array.isArray(apiResponse) &&
+        apiResponse.length > 0 &&
+        apiResponse[0].name
+      ) {
+        html +=
+          '<div class="github-pinned-repos-bot"><h4>Pinned Repositories</h4>';
+        apiResponse.forEach((repo) => {
+          html += `
+            <div class="repo-item-bot" itemscope itemtype="https://schema.org/SoftwareSourceCode">
+              <h5 itemprop="name">${escapeHtml(repo.name)}</h5>
+              <p itemprop="description">${escapeHtml(
+                repo.description || "No description"
+              )}</p>
+              <div class="repo-stats-bot">
+                <span>Language: ${
+                  repo.primaryLanguage?.name || "Not specified"
+                }</span>
+                <span>⭐ ${repo.stargazerCount || 0}</span>
+                <span>🍴 ${repo.forkCount || 0}</span>
+              </div>
+            </div>
+          `;
+        });
+        html += "</div>";
+      }
+
+      // Handle top languages array
+      if (
+        Array.isArray(apiResponse) &&
+        apiResponse.length > 0 &&
+        apiResponse[0].percentage
+      ) {
+        html += '<div class="github-languages-bot"><h4>Top Languages</h4>';
+        apiResponse.slice(0, 5).forEach((lang) => {
+          html += `
+            <div class="language-item-bot">
+              <span class="language-name" style="color: ${
+                lang.color || "#333"
+              }">${escapeHtml(lang.name)}</span>
+              <span class="language-percentage">${lang.percentage}%</span>
+            </div>
+          `;
+        });
+        html += "</div>";
+      }
+    });
+
+    html += "</div>";
+    return html;
+  } catch (error) {
+    logError(error, "generateGitHubContentHtml");
+    return '<div class="error-message"><h3>Error loading GitHub content</h3></div>';
+  }
+}
 // ======================================================================
 // ENHANCED DYNAMIC COMPONENT HYDRATION
 // ======================================================================
@@ -2224,7 +2963,7 @@ function addComponentHydration(html, pathname, apiData) {
   const nonce = generateNonce();
 
   const hydrationScript = `
-    <script nonce="${nonce}" data-hydrate="${componentType}">
+    <script nonce="${nonce}" data-hydrate="${componentType}" defer>
       (function() {
         'use strict';
         
@@ -2408,10 +3147,15 @@ function gracefulDegradation(html) {
 /**
  * Enhanced image loading optimization
  */
+/**
+ * Enhanced image loading optimization - REPLACE THIS FUNCTION
+ */
 function optimizeImageLoading(html) {
   try {
     let imgCount = 0;
-    return html.replace(/<img([^>]+)>/g, (match, attrs) => {
+
+    // First pass: Add progressive loading attributes
+    html = html.replace(/<img([^>]+)>/g, (match, attrs) => {
       imgCount++;
 
       // Add progressive loading attributes
@@ -2435,6 +3179,19 @@ function optimizeImageLoading(html) {
 
       return `<img${attrs}>`;
     });
+
+    // Second pass: FIXED - Ensure all images have alt text
+    html = html.replace(/<img([^>]+)>/g, (match, attrs) => {
+      // Fix empty alt attributes
+      attrs = attrs.replace(/alt=""/g, 'alt="Image"');
+      // Add alt if missing
+      if (!attrs.includes("alt=")) {
+        attrs += ' alt="Image"';
+      }
+      return `<img${attrs}>`;
+    });
+
+    return html;
   } catch (error) {
     logError(error, "optimizeImageLoading");
     return html;
@@ -2484,6 +3241,9 @@ function generateCSPHeader(nonce) {
 /**
  * Enhanced SEO enhancements with better metadata
  */
+/**
+ * Enhanced SEO enhancements with better metadata - REPLACE THIS FUNCTION
+ */
 function addSEOEnhancements(html, url, apiData) {
   try {
     const pathname = url.pathname;
@@ -2491,7 +3251,7 @@ function addSEOEnhancements(html, url, apiData) {
     const normalizedPath = pathname.endsWith(".html")
       ? pathname.slice(0, -5)
       : pathname;
-    const canonicalUrl = url.origin + normalizedPath;
+    const canonicalUrl = url.origin + normalizedPath.replace(/\.html$/, "");
 
     // Enhanced canonical URL handling
     if (!html.includes('rel="canonical"')) {
@@ -2501,35 +3261,37 @@ function addSEOEnhancements(html, url, apiData) {
       );
     }
 
-    // Enhanced hreflang implementation
-    if (isChinesePage) {
-      const englishUrl = url.origin + normalizedPath.replace("/zh", "");
-      html = html.replace(
-        /<head>/,
-        `<head>\n    <link rel="alternate" hreflang="en" href="${englishUrl}">`
-      );
-      html = html.replace(
-        /<head>/,
-        `<head>\n    <link rel="alternate" hreflang="zh" href="${canonicalUrl}">`
-      );
-      html = html.replace(
-        /<head>/,
-        `<head>\n    <link rel="alternate" hreflang="x-default" href="${englishUrl}">`
-      );
-    } else {
-      const chineseUrl = url.origin + "/zh" + normalizedPath;
-      html = html.replace(
-        /<head>/,
-        `<head>\n    <link rel="alternate" hreflang="zh" href="${chineseUrl}">`
-      );
-      html = html.replace(
-        /<head>/,
-        `<head>\n    <link rel="alternate" hreflang="en" href="${canonicalUrl}">`
-      );
-      html = html.replace(
-        /<head>/,
-        `<head>\n    <link rel="alternate" hreflang="x-default" href="${canonicalUrl}">`
-      );
+    // Enhanced hreflang implementation - FIXED: Check if hreflang already exists
+    if (!html.includes('rel="alternate" hreflang=')) {
+      if (isChinesePage) {
+        const englishUrl = url.origin + normalizedPath.replace("/zh", "");
+        html = html.replace(
+          /<head>/,
+          `<head>\n    <link rel="alternate" hreflang="en" href="${englishUrl}">`
+        );
+        html = html.replace(
+          /<head>/,
+          `<head>\n    <link rel="alternate" hreflang="zh" href="${canonicalUrl}">`
+        );
+        html = html.replace(
+          /<head>/,
+          `<head>\n    <link rel="alternate" hreflang="x-default" href="${englishUrl}">`
+        );
+      } else {
+        const chineseUrl = url.origin + "/zh" + normalizedPath;
+        html = html.replace(
+          /<head>/,
+          `<head>\n    <link rel="alternate" hreflang="zh" href="${chineseUrl}">`
+        );
+        html = html.replace(
+          /<head>/,
+          `<head>\n    <link rel="alternate" hreflang="en" href="${canonicalUrl}">`
+        );
+        html = html.replace(
+          /<head>/,
+          `<head>\n    <link rel="alternate" hreflang="x-default" href="${canonicalUrl}">`
+        );
+      }
     }
 
     // Enhanced structured data
@@ -3006,7 +3768,7 @@ function shouldRenderForBot(pathname) {
 /**
  * Enhanced bot rendering with comprehensive optimizations
  */
-async function renderForBot(request, url) {
+async function renderForBot(request, url, env, ctx) {
   const renderStart = Date.now();
   const requestId = generateNonce().substring(0, 8);
   const userAgent = request.headers.get("User-Agent") || "";
@@ -3054,7 +3816,7 @@ async function renderForBot(request, url) {
         `📡 [${requestId}] Fetching API data from ${apiEndpoints.length} endpoints`
       );
       const apiStart = Date.now();
-      apiDataResults = await fetchAndValidateApiData(apiEndpoints);
+      apiDataResults = await fetchAndValidateApiData(apiEndpoints, env, ctx);
 
       enhancedMetrics.apiMetrics.avgApiResponseTime = Date.now() - apiStart;
       enhancedMetrics.apiMetrics.dataFreshness = Date.now();
@@ -3408,7 +4170,13 @@ export default {
       if (url.pathname === "/bot-health") {
         return handleHealthCheck();
       }
-
+      if (url.pathname.startsWith("/api/github/")) {
+        console.log(`🔍 GitHub API request detected: ${url.pathname}`);
+        const githubResponse = await handleGitHubAPI(request, env, ctx);
+        if (githubResponse) {
+          return githubResponse;
+        }
+      }
       // Enhanced bot detection
       const userAgent = request.headers.get("User-Agent") || "";
       const isBot = BOT_CONFIG.enabled && isBotUserAgent(userAgent);
@@ -3427,7 +4195,7 @@ export default {
         request.method === "GET" &&
         shouldRenderForBot(url.pathname)
       ) {
-        const renderedResponse = await renderForBot(request, url);
+        const renderedResponse = await renderForBot(request, url, env, ctx);
 
         if (renderedResponse) {
           // Add request tracking headers
