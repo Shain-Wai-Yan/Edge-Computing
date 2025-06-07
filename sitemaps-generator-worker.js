@@ -1,5 +1,5 @@
 /**
- * Enterprise Sitemap Generator & Auto-Submission Worker v3.0.0
+ * Enterprise Sitemap Generator & Auto-Submission Worker v3.1.0
  * COMPLETE VERSION: All original functionality + DeepSeek optimizations
  * ENHANCED: Implements all recommendations with enterprise-level SEO optimizations
  */
@@ -145,6 +145,13 @@ const STATIC_PAGES = [
     lastmod: () => new Date().toISOString().split("T")[0],
   },
   {
+    path: "blog",
+    priority: 0.9,
+    changefreq: "daily",
+    isFeatured: true,
+    lastmod: () => new Date().toISOString().split("T")[0],
+  },
+  {
     path: "coding-project",
     priority: 0.7,
     changefreq: "monthly",
@@ -217,6 +224,61 @@ const DYNAMIC_PAGES = {
       return featured ? 0.8 : 0.6;
     },
     enableImages: true,
+  },
+
+  blog: {
+    endpoint: "/api/blogs",
+    listingPriority: 0.9,
+    itemPriority: 0.8,
+    changefreq: "weekly",
+    pathGenerator: (item) => {
+      const slug = getItemSlug(item);
+      return slug ? `blog/${slug}` : null;
+    },
+    priorityCalculator: (item) => {
+      const featured =
+        getItemData(item, "Featured") || getItemData(item, "featured");
+
+      const publishDate =
+        getItemData(item, "publishDate") || getItemData(item, "createdAt");
+
+      let priority = featured ? 0.9 : 0.8;
+
+      // Boost priority for recent posts
+      if (publishDate) {
+        // Convert publishDate to a number to ensure proper arithmetic
+        const publishDateObj = new Date(publishDate);
+        // Only calculate if we have a valid date
+        if (!isNaN(publishDateObj.getTime())) {
+          const daysSincePublish =
+            (Date.now() - publishDateObj.getTime()) / (1000 * 60 * 60 * 24);
+
+          if (daysSincePublish < 7) {
+            priority += 0.1; // Recent posts get boost
+          } else if (daysSincePublish < 30) {
+            priority += 0.05; // Month-old posts get smaller boost
+          }
+        }
+      }
+
+      return Math.min(priority, 1.0);
+    },
+    enableImages: true,
+    customImageExtractor: (item) => {
+      // Extract featured image from blog post
+      const featuredImage = getItemData(item, "featuredImage");
+      if (featuredImage) {
+        // Handle Strapi v5 structure
+        if (featuredImage.url) {
+          return featuredImage.url;
+        }
+        // Handle Strapi v4 structure
+        if (featuredImage.data?.attributes?.url) {
+          return featuredImage.data.attributes.url;
+        }
+      }
+      return null;
+    },
   },
   "coding-project": {
     endpoint: "/api/coding-projects",
@@ -291,7 +353,9 @@ function getItemLastMod(item) {
   const updatedAt =
     getItemData(item, "updatedAt") || getItemData(item, "updated_at");
   const publishedAt =
-    getItemData(item, "publishedAt") || getItemData(item, "published_at");
+    getItemData(item, "publishedAt") ||
+    getItemData(item, "published_at") ||
+    getItemData(item, "publishDate");
 
   return formatDate(updatedAt || publishedAt || new Date());
 }
@@ -353,6 +417,7 @@ class EnhancedSitemapGenerator {
       staticUrls: 0,
       dynamicUrls: 0,
       individualUrls: 0,
+      blogUrls: 0,
       imageUrls: 0,
       errors: 0,
       submissions: {},
@@ -1128,10 +1193,15 @@ class EnhancedSitemapGenerator {
 
               // ENHANCED: Add images if enabled with language support
               if (config.enableImages && CONFIG.SITEMAP.ENABLE_IMAGE_SITEMAP) {
-                this.addItemImages(itemUrl, item, lang);
+                this.addItemImages(itemUrl, item, lang, config);
               }
 
               this.stats.individualUrls++;
+
+              // Track blog URLs separately
+              if (pageType === "blog") {
+                this.stats.blogUrls++;
+              }
             }
           }
 
@@ -1240,14 +1310,23 @@ class EnhancedSitemapGenerator {
   }
 
   // ENHANCED: Add images with language-specific titles and captions
-  addItemImages(pageUrl, item, lang = "en") {
-    const imageUrl = getImageUrl(item);
+  addItemImages(pageUrl, item, lang = "en", config = {}) {
+    let imageUrl = null;
+
+    // Use custom image extractor if available (for blog posts)
+    if (config.customImageExtractor) {
+      imageUrl = config.customImageExtractor(item);
+    } else {
+      imageUrl = getImageUrl(item);
+    }
+
     if (imageUrl) {
       let title =
         getItemData(item, "title") || getItemData(item, "Title") || "Image";
       let caption =
         getItemData(item, "description") ||
         getItemData(item, "Description") ||
+        getItemData(item, "excerpt") ||
         "";
 
       // ENHANCED: Add language-specific titles for Chinese as recommended
@@ -1258,30 +1337,13 @@ class EnhancedSitemapGenerator {
           "Circular Entrepreneurship Training": "循环创业培训",
           "Rainy scene at Sulamuni": "苏拉穆尼雨景",
           "Cloud scene view": "云景观",
-          "Comprehensive Business Strategy": "综合商业策略",
-          "Digital Marketing Strategy": "数字营销策略",
-          "Portfolio Website v2.0": "作品集网站 v2.0",
-          "Sunset Pagoda Silhouette": "日落佛塔剪影",
-          "Morning Mist Mountains": "晨雾山景",
-          "Traditional Market Scene": "传统市场场景",
-          "Ancient Temple Architecture": "古代寺庙建筑",
-          "Festival Celebration": "节日庆典",
-          "Golden Hour Portrait": "黄金时刻肖像",
-          "Urban Night Lights": "城市夜景灯光",
-          "Wildlife Bird Photography": "野生鸟类摄影",
-          "Cultural Dance Performance": "文化舞蹈表演",
-          "Rice Terrace Patterns": "梯田图案",
-          "Waterfall Long Exposure": "瀑布长曝光",
-          "Spice Market Colors": "香料市场色彩",
-          "Tea Plantation Workers": "茶园工人",
-          "Ancient Ruins Exploration": "古遗址探索",
-          "Mountain Hiking Trail": "山地徒步小径",
-          "Silk Weaving Process": "丝绸编织过程",
-          "Cave Temple Interior": "洞穴寺庙内部",
-          "Traditional Puppet Show": "传统木偶戏",
-          "Meditation Garden Zen": "禅意冥想花园",
-          "Bamboo Forest Path": "竹林小径",
-          "Traditional House Architecture": "传统房屋建筑",
+          // Add blog-related translations:
+          "Getting Started with Web Development": "Web开发入门指南",
+          "Digital Marketing Trends": "数字营销趋势",
+          "Building Responsive Websites": "构建响应式网站",
+          "SEO Optimization Techniques": "SEO优化技术",
+          "JavaScript Frameworks Comparison": "JavaScript框架比较",
+          // ... keep your existing translations
         };
         title = translations[title] || title;
       }
@@ -1809,10 +1871,19 @@ async function handleRequest(request, env) {
             sitemapIndex: CONFIG.SITEMAP.ENABLE_SITEMAP_INDEX,
             imageSitemap: CONFIG.SITEMAP.ENABLE_IMAGE_SITEMAP,
             videoSitemap: CONFIG.SITEMAP.ENABLE_VIDEO_SITEMAP,
+            blogSupport: true, // ADD THIS LINE
             kvStorage: !!env.SITEMAP_KV,
             authentication: !!env.STRAPI_API_TOKEN,
             cleanUrls: !CONFIG.SITE.INCLUDE_HTML_EXTENSION,
             alternateLinks: CONFIG.SITEMAP.INCLUDE_ALTERNATES,
+          },
+          collections: {
+            blog: "Dynamic blog posts from CMS", // ADD THIS SECTION
+            businessPlan: "Business planning documents",
+            marketingPlan: "Marketing strategy documents",
+            certificate: "Professional certificates",
+            photography: "Photography portfolio",
+            codingProject: "Development projects",
           },
           limits: {
             maxUrlsPerSitemap: CONFIG.SITEMAP.MAX_URLS_PER_SITEMAP,
@@ -2651,24 +2722,28 @@ async function handleRequest(request, env) {
                     </svg>
                     Statistics
                 </h2>
-                <div class="stats-grid" id="stats-grid">
-                    <div class="stat">
-                        <div class="stat-number" id="total-urls">-</div>
-                        <div class="stat-label">Total URLs</div>
-                    </div>
-                    <div class="stat">
-                        <div class="stat-number" id="static-urls">-</div>
-                        <div class="stat-label">Static</div>
-                    </div>
-                    <div class="stat">
-                        <div class="stat-number" id="dynamic-urls">-</div>
-                        <div class="stat-label">Dynamic</div>
-                    </div>
-                    <div class="stat">
-                        <div class="stat-number" id="image-urls">-</div>
-                        <div class="stat-label">Images</div>
-                    </div>
-                </div>
+<div class="stats-grid" id="stats-grid">
+    <div class="stat">
+        <div class="stat-number" id="total-urls">-</div>
+        <div class="stat-label">Total URLs</div>
+    </div>
+    <div class="stat">
+        <div class="stat-number" id="static-urls">-</div>
+        <div class="stat-label">Static</div>
+    </div>
+    <div class="stat">
+        <div class="stat-number" id="dynamic-urls">-</div>
+        <div class="stat-label">Dynamic</div>
+    </div>
+    <div class="stat">
+        <div class="stat-number" id="blog-urls">-</div>
+        <div class="stat-label">Blog Posts</div>
+    </div>
+    <div class="stat">
+        <div class="stat-number" id="image-urls">-</div>
+        <div class="stat-label">Images</div>
+    </div>
+</div>
             </div>
 
             <div class="card">
@@ -2841,11 +2916,12 @@ async function handleRequest(request, env) {
         }
 
         function updateStats(stats) {
-            document.getElementById('total-urls').textContent = stats.totalUrls || 0;
-            document.getElementById('static-urls').textContent = stats.staticUrls || 0;
-            document.getElementById('dynamic-urls').textContent = stats.dynamicUrls || 0;
-            document.getElementById('image-urls').textContent = stats.imageUrls || 0;
-        }
+  document.getElementById('total-urls').textContent = stats.totalUrls || 0;
+  document.getElementById('static-urls').textContent = stats.staticUrls || 0;
+  document.getElementById('dynamic-urls').textContent = stats.dynamicUrls || 0;
+  document.getElementById('blog-urls').textContent = stats.blogUrls || 0; 
+  document.getElementById('image-urls').textContent = stats.imageUrls || 0;
+}
 
         function updateSubmissions(submissions) {
             const container = document.getElementById('submissions-container');
