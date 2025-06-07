@@ -191,7 +191,7 @@ const BOT_CONFIG = {
     "/certificate": ["/api/certificates?populate=*"],
     "/marketing-plan": ["/api/marketing-plans?populate=*"],
     "/business-plan": ["/api/business-plans?populate=*"],
-    "/blog": ["/api/blog-posts?populate=*&pagination[limit]=20"],
+    "/blog": ["/api/blogs?populate=*&pagination[limit]=20"],
     "/coding-project": [
       "/api/coding-projects?populate=*&pagination[limit]=20",
       "/api/github/users/Shain-Wai-Yan",
@@ -205,7 +205,7 @@ const BOT_CONFIG = {
     "/zh/certificate": ["/api/certificates?populate=*&locale=zh"],
     "/zh/marketing-plan": ["/api/marketing-plans?populate=*&locale=zh"],
     "/zh/business-plan": ["/api/business-plans?populate=*&locale=zh"],
-    "/zh/blog": ["/api/blog-posts?populate=*&locale=zh&pagination[limit]=20"],
+    "/zh/blog": ["/api/blogs?populate=*&locale=zh&pagination[limit]=20"],
     "/zh/coding-project": [
       "/api/coding-projects?populate=*&locale=zh&pagination[limit]=20",
       "/api/github/users/Shain-Wai-Yan",
@@ -1896,8 +1896,61 @@ const isValidPlanData = (data) =>
   isValidContentData(data, ["Title", "title", "name"]);
 const isValidAmvData = (data) =>
   isValidContentData(data, ["Title", "title", "name"]);
-const isValidBlogData = (data) =>
-  isValidContentData(data, ["Title", "title", "headline"]);
+/**
+ * Enhanced blog data validation with better structure handling
+ */
+function isValidBlogData(data) {
+  try {
+    if (!data?.data) {
+      console.log("❌ Blog validation failed: No data property");
+      return false;
+    }
+
+    if (Array.isArray(data.data)) {
+      if (data.data.length === 0) {
+        console.log("❌ Blog validation failed: Empty data array");
+        return false;
+      }
+
+      // Check if at least one item has required fields
+      const validItems = data.data.filter((item) => {
+        const hasTitle = !!(
+          getDataFromItem(item, "Title") ||
+          getDataFromItem(item, "title") ||
+          getDataFromItem(item, "headline")
+        );
+
+        const hasContent = !!(
+          getDataFromItem(item, "excerpt") ||
+          getDataFromItem(item, "Excerpt") ||
+          getDataFromItem(item, "description") ||
+          getDataFromItem(item, "Description")
+        );
+
+        return hasTitle || hasContent;
+      });
+
+      console.log(
+        `✅ Blog validation: ${validItems.length}/${data.data.length} valid items`
+      );
+      return validItems.length > 0;
+    } else {
+      // Single blog post
+      const hasTitle = !!(
+        getDataFromItem(data.data, "Title") ||
+        getDataFromItem(data.data, "title") ||
+        getDataFromItem(data.data, "headline")
+      );
+
+      console.log(`✅ Blog validation: Single post, has title: ${hasTitle}`);
+      return hasTitle;
+    }
+  } catch (error) {
+    console.error("❌ Blog validation error:", error);
+    logError(error, "isValidBlogData");
+    return false;
+  }
+}
 
 // ======================================================================
 // ENHANCED CONTENT GENERATORS
@@ -2500,15 +2553,23 @@ function generateAmvEditingHtml(apiData) {
 /**
  * Enhanced blog HTML generator
  */
+/**
+ * Enhanced blog HTML generator with better category/tag extraction
+ */
 function generateBlogHtml(apiData) {
   try {
+    console.log("🔧 Generating blog HTML...", apiData);
+
     if (!isValidBlogData(apiData)) {
+      console.log("⚠️ Invalid blog data, showing fallback");
       return '<div class="no-content"><h3>Blog content is being loaded...</h3></div>';
     }
 
     let html = '<div class="blog-posts-container-bot" data-component="blog">';
 
-    apiData.data.forEach((item) => {
+    apiData.data.forEach((item, index) => {
+      console.log(`Processing blog item ${index}:`, item);
+
       const title = escapeHtml(
         getDataFromItem(item, "Title") ||
           getDataFromItem(item, "title") ||
@@ -2516,40 +2577,98 @@ function generateBlogHtml(apiData) {
       );
 
       const excerpt = escapeHtml(
-        getDataFromItem(item, "Excerpt") ||
+        getDataFromItem(item, "excerpt") ||
+          getDataFromItem(item, "Excerpt") ||
           getDataFromItem(item, "description") ||
+          getDataFromItem(item, "Description") ||
           ""
       );
 
       const publishedAt =
+        getDataFromItem(item, "publishDate") ||
         getDataFromItem(item, "publishedAt") ||
-        getDataFromItem(item, "PublishedAt");
+        getDataFromItem(item, "PublishedAt") ||
+        getDataFromItem(item, "createdAt");
 
       const date = publishedAt
         ? new Date(publishedAt).toLocaleDateString()
         : "";
 
       const slug =
-        getDataFromItem(item, "Slug") || getDataFromItem(item, "slug") || "";
+        getDataFromItem(item, "slug") || getDataFromItem(item, "Slug") || "";
 
+      // Enhanced featured image extraction
       const featuredImageUrl =
+        getImageUrl(item, "featuredImage") ||
         getImageUrl(item, "FeaturedImage") ||
+        getImageUrl(item, "image") ||
         createAdaptivePlaceholder(400, 300, "Blog Post");
 
-      // Enhanced blog metadata
+      // Enhanced author extraction
       const author = escapeHtml(
         getDataFromItem(item, "Author") ||
           getDataFromItem(item, "author") ||
           "Shain Wai Yan"
       );
 
+      // Enhanced reading time extraction
       const readTime =
         getDataFromItem(item, "ReadTime") ||
         getDataFromItem(item, "readTime") ||
+        getDataFromItem(item, "reading_time") ||
         "";
 
-      const tags =
-        getDataFromItem(item, "Tags") || getDataFromItem(item, "tags") || [];
+      // Enhanced category extraction - FIXED
+      const categories = [];
+      const categoryData = getDataFromItem(item, "category");
+      if (categoryData) {
+        if (typeof categoryData === "string") {
+          categories.push(categoryData.trim());
+        } else if (categoryData.name) {
+          categories.push(categoryData.name.trim());
+        } else if (categoryData.data?.attributes?.name) {
+          categories.push(categoryData.data.attributes.name.trim());
+        }
+      }
+
+      // Also check for categories (plural)
+      const categoriesData = getDataFromItem(item, "categories");
+      if (categoriesData && Array.isArray(categoriesData)) {
+        categoriesData.forEach((cat) => {
+          if (typeof cat === "string") {
+            categories.push(cat.trim());
+          } else if (cat.name) {
+            categories.push(cat.name.trim());
+          } else if (cat.attributes?.name) {
+            categories.push(cat.attributes.name.trim());
+          }
+        });
+      }
+
+      // Enhanced tags extraction - FIXED
+      const tags = [];
+      const tagsData = getDataFromItem(item, "tags");
+      if (tagsData) {
+        if (Array.isArray(tagsData)) {
+          tagsData.forEach((tag) => {
+            if (typeof tag === "string") {
+              tags.push(tag.trim());
+            } else if (tag.name) {
+              tags.push(tag.name.trim());
+            } else if (tag.attributes?.name) {
+              tags.push(tag.attributes.name.trim());
+            }
+          });
+        }
+      }
+
+      console.log(`Blog item ${index} processed:`, {
+        title,
+        categories,
+        tags,
+        slug,
+        hasImage: !!featuredImageUrl,
+      });
 
       html += `
         <article class="blog-post-item" itemscope itemtype="https://schema.org/BlogPosting">
@@ -2574,9 +2693,18 @@ function generateBlogHtml(apiData) {
           </div>
           ${excerpt ? `<p itemprop="description">${excerpt}</p>` : ""}
           ${
-            Array.isArray(tags) && tags.length > 0
+            categories.length > 0
+              ? `<div class="categories">${categories
+                  .map(
+                    (cat) => `<span class="category">${escapeHtml(cat)}</span>`
+                  )
+                  .join("")}</div>`
+              : ""
+          }
+          ${
+            tags.length > 0
               ? `<div class="tags">${tags
-                  .map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`)
+                  .map((tag) => `<span class="tag">#${escapeHtml(tag)}</span>`)
                   .join("")}</div>`
               : ""
           }
@@ -2590,8 +2718,10 @@ function generateBlogHtml(apiData) {
     });
 
     html += "</div>";
+    console.log("✅ Blog HTML generated successfully");
     return html;
   } catch (error) {
+    console.error("❌ Error generating blog HTML:", error);
     logError(error, "generateBlogHtml");
     return '<div class="error-message"><h3>Error loading blog content</h3></div>';
   }
@@ -3476,25 +3606,41 @@ function generateEnhancedStructuredData(pathname, apiData, url) {
         "@type": "Blog",
         name: "Blog - Shain Wai Yan",
         description: "Insights on marketing, programming, and creative design",
-        blogPost: apiData.data.map((item) => ({
-          "@type": "BlogPosting",
-          headline:
-            getDataFromItem(item, "Title") || getDataFromItem(item, "title"),
-          description:
+        blogPost: apiData.data.map((item) => {
+          // Enhanced blog post structured data
+          const title =
+            getDataFromItem(item, "Title") || getDataFromItem(item, "title");
+          const excerpt =
+            getDataFromItem(item, "excerpt") ||
             getDataFromItem(item, "Excerpt") ||
-            getDataFromItem(item, "description"),
-          datePublished:
+            getDataFromItem(item, "description");
+          const publishedAt =
+            getDataFromItem(item, "publishDate") ||
             getDataFromItem(item, "publishedAt") ||
-            getDataFromItem(item, "PublishedAt"),
-          author: {
-            "@type": "Person",
-            name: "Shain Wai Yan",
-          },
-          publisher: {
-            "@type": "Organization",
-            name: "Shain Wai Yan Portfolio",
-          },
-        })),
+            getDataFromItem(item, "PublishedAt");
+          const slug =
+            getDataFromItem(item, "slug") || getDataFromItem(item, "Slug");
+          const featuredImage =
+            getImageUrl(item, "featuredImage") ||
+            getImageUrl(item, "FeaturedImage");
+
+          return {
+            "@type": "BlogPosting",
+            headline: title,
+            description: excerpt,
+            datePublished: publishedAt,
+            url: slug ? `${url.origin}/blog/${slug}` : url.href,
+            image: featuredImage,
+            author: {
+              "@type": "Person",
+              name: "Shain Wai Yan",
+            },
+            publisher: {
+              "@type": "Organization",
+              name: "Shain Wai Yan Digital Studio",
+            },
+          };
+        }),
       };
     }
 
